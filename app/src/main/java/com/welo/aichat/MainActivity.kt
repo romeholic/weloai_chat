@@ -109,9 +109,25 @@ class MainActivity : ComponentActivity() {
         // 语音识别结果
         var recognitionResult by remember { mutableStateOf("") }
 
-        // 直接从SD卡加载模型，无需复制
+
+        // 使用反射设置模型语言（解决原始模型lang None错误）
+        fun setModelLanguage(model: Model?, languageCode: String) {
+            if (model == null) return
+
+            try {
+                val langField = Model::class.java.getDeclaredField("_lang")
+                langField.isAccessible = true
+                langField.set(model, languageCode)
+                Log.d("VoskModel", "模型语言设置为: $languageCode")
+            } catch (e: Exception) {
+                Log.e("VoskModel", "设置模型语言失败: ${e.message}", e)
+                // 即使设置语言失败，也继续执行，可能仍能工作
+            }
+        }
+
+        // 直接从SD卡加载原始模型，无需标准格式
         fun initVoskModelDirectlyFromSDCard(context: Context) {
-            Log.d("VoskModel", "开始从SD卡直接加载Vosk模型")
+            Log.d("VoskModel", "开始从SD卡直接加载Vosk原始模型")
 
             scope.launch {
                 try {
@@ -127,10 +143,27 @@ class MainActivity : ComponentActivity() {
                         throw IOException("SD卡模型目录不存在: $modelPath")
                     }
 
-                    // 直接加载模型
-                    Log.d("VoskModel", "加载模型: $modelPath")
+                    // 验证原始模型必要文件
+                    val requiredFiles = listOf(
+                        "am/final.mdl",
+                        "graph/HCLG.fst",
+                        "graph/words.txt",
+                        "ivector/final.ie"
+                    )
+
+                    val missingFiles = requiredFiles.filter { !File(modelDir, it).exists() }
+                    if (missingFiles.isNotEmpty()) {
+                        throw IOException("缺失原始模型必要文件: ${missingFiles.joinToString()}")
+                    }
+
+                    // 直接加载原始模型
+                    Log.d("VoskModel", "加载原始模型: $modelPath")
                     model = Model(modelPath)
-                    Log.d("VoskModel", "模型加载成功")
+
+                    // 使用反射设置语言（解决lang None错误）
+                    setModelLanguage(model, "zh")
+
+                    Log.d("VoskModel", "原始模型加载成功")
 
                     scope.launch {
                         snackbarHostState.showSnackbar("语音识别模型加载成功")
