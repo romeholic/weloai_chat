@@ -104,7 +104,6 @@ class ChatViewModel : ViewModel() {
                 // 将 Uri 转换为 File 或字节数组
                 val imageFile = uriToFile(imageUri, context)
                 val uploadResponse = uploadImage(imageFile)
-                //val imageUrl = uploadResponse.file_path
                 val imageUrl = "http://192.168.111.10:7860/files/${uploadResponse.file_path}"
                 android.util.Log.e("liutuo", "uploadImage return imageUrl:$imageUrl")
                 // 更新消息状态

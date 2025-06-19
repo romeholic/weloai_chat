@@ -1,18 +1,22 @@
 package com.welo.aichat
 
 import android.Manifest
-import android.app.Activity
-import android.media.MediaRecorder
+import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.util.Log
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Image
@@ -23,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.TextFieldValue
@@ -34,13 +39,18 @@ import com.welo.aichat.data.ChatMessage
 import com.welo.aichat.data.MessageType
 import com.welo.aichat.ui.theme.Welo_aichatTheme
 import com.welo.aichat.viewmodel.ChatViewModel
-import java.io.File
 import kotlinx.coroutines.launch
 import androidx.compose.ui.res.painterResource
+import androidx.core.content.ContextCompat
+import org.vosk.LibVosk
+import org.vosk.LogLevel
+import org.vosk.Model
+import org.vosk.android.RecognitionListener
+import org.vosk.android.SpeechService
+import java.io.File
+import java.io.IOException
 
 class MainActivity : ComponentActivity() {
-    private var mediaRecorder: MediaRecorder? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -49,12 +59,6 @@ class MainActivity : ComponentActivity() {
                 ChatScreen()
             }
         }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        mediaRecorder?.release()
-        mediaRecorder = null
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -95,44 +99,168 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 录音文件 URI
-        var audioUri by remember { mutableStateOf<Uri?>(null) }
+        // 录音状态
+        var isRecording by remember { mutableStateOf(false) }
 
-        // 开始录音
-        fun startAudioRecording() {
-            val file = File(context.cacheDir, "recording.3gp")
-            audioUri = Uri.fromFile(file)
+        // Vosk相关变量
+        var speechService: SpeechService? = null
+        var model: Model? = null
 
-            mediaRecorder = MediaRecorder().apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.THREE_GPP)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
-                setOutputFile(file.absolutePath)
+        // 语音识别结果
+        var recognitionResult by remember { mutableStateOf("") }
 
+        // 直接从SD卡加载模型，无需复制
+        fun initVoskModelDirectlyFromSDCard(context: Context) {
+            Log.d("VoskModel", "开始从SD卡直接加载Vosk模型")
+
+            scope.launch {
                 try {
-                    prepare()
-                    start()
+                    snackbarHostState.showSnackbar("正在加载语音识别模型...")
+                    LibVosk.setLogLevel(LogLevel.INFO)
+
+                    // SD卡模型路径（根据实际情况调整）
+                    val modelPath = "/sdcard/model-cn"
+
+                    // 验证模型目录存在
+                    val modelDir = File(modelPath)
+                    if (!modelDir.exists() || !modelDir.isDirectory) {
+                        throw IOException("SD卡模型目录不存在: $modelPath")
+                    }
+
+                    // 直接加载模型
+                    Log.d("VoskModel", "加载模型: $modelPath")
+                    model = Model(modelPath)
+                    Log.d("VoskModel", "模型加载成功")
+
+                    scope.launch {
+                        snackbarHostState.showSnackbar("语音识别模型加载成功")
+                    }
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    Log.e("VoskModel", "模型初始化失败", e)
+                    scope.launch {
+                        snackbarHostState.showSnackbar("模型加载失败: ${e.message}")
+                    }
                 }
             }
         }
 
-        // 语音录制结果处理
-        val recordAudioLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted: Boolean ->
-            if (granted) {
-                // 开始录音
-                startAudioRecording()
-            } else {
-                // 显示权限被拒绝的提示
+        // 初始化Vosk模型
+        LaunchedEffect(Unit) {
+            //initVoskModelFromSDCard(context, "/sdcard/model-cn/vosk-model-cn-0.22")
+            initVoskModelDirectlyFromSDCard(context)
+        }
+
+        // 开始录音和识别
+        fun startRecognition() {
+            if (model == null) {
+                scope.launch {
+                    snackbarHostState.showSnackbar("模型未加载，请稍候...")
+                }
+                return
+            }
+
+            try {
+                // 创建识别器，设置采样率为16000Hz
+                val recognizer = org.vosk.Recognizer(model, 16000.0f)
+
+                // 创建语音服务
+                speechService = SpeechService(recognizer, 16000.0f).apply {
+                    startListening(object : RecognitionListener {
+                        // Vosk识别结果回调（中间结果）
+                        override fun onResult(hypothesis: String?) {
+                            hypothesis?.let {
+                                scope.launch {
+                                    recognitionResult = it
+                                    // 实时显示识别结果
+                                }
+                            }
+                        }
+
+                        // Vosk最终识别结果回调
+                        override fun onFinalResult(hypothesis: String?) {
+                            hypothesis?.let { finalResult ->
+                                scope.launch {
+                                    recognitionResult = finalResult
+                                    // 发送最终识别结果到后端
+                                    viewModel.sendMessageToAI("用户语音输入: $finalResult")
+
+                                    // 添加语音消息到聊天列表
+                                    val newMessages = chatMessages.toMutableList()
+                                    newMessages.add(
+                                        ChatMessage(
+                                            content = "语音已发送",
+                                            isUser = true,
+                                            type = MessageType.AUDIO,
+                                            timestamp = System.currentTimeMillis()
+                                        )
+                                    )
+                                    viewModel.updateMessages(newMessages)
+                                }
+                            }
+                        }
+
+                        // 识别错误回调
+                        override fun onError(e: Exception?) {
+                            scope.launch {
+                                val errorMessage = e?.message ?: "识别错误"
+                                snackbarHostState.showSnackbar(errorMessage)
+                            }
+                        }
+
+                        // 识别超时回调
+                        override fun onTimeout() {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("识别超时")
+                            }
+                        }
+
+                        // 以下是可选方法的空实现
+                        override fun onPartialResult(hypothesis: String?) {
+                            // 处理部分识别结果（可选）
+                        }
+                    })
+                }
+                isRecording = true
+            } catch (e: Exception) {
+                scope.launch {
+                    snackbarHostState.showSnackbar("启动识别失败: ${e.message}")
+                }
+                isRecording = false
             }
         }
 
-        // 停止录音并发送
-        fun stopAudioRecording() {
-            audioUri?.let { viewModel.sendAudio(it, context) }
+        // 停止录音和识别
+        fun stopRecognition() {
+            speechService?.stop()
+            speechService?.shutdown()
+            speechService = null
+            isRecording = false
+        }
+
+        // 请求录音权限
+        val requestPermissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                startRecognition()
+            } else {
+                scope.launch {
+                    snackbarHostState.showSnackbar("需要录音权限才能使用语音消息功能")
+                }
+            }
+        }
+
+        // 检查权限并开始录音
+        fun checkPermissionAndStartRecording() {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                startRecognition()
+            } else {
+                requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
 
         Scaffold(
@@ -157,6 +285,39 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // 录音状态提示
+                if (isRecording) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(8.dp)
+                            .background(Color.Red.copy(alpha = 0.2f))
+                            .padding(12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Mic,
+                                    contentDescription = "正在录音",
+                                    tint = Color.Red,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("正在识别...", color = Color.Red)
+                            }
+
+                            if (recognitionResult.isNotEmpty()) {
+                                Text(
+                                    text = "识别中: $recognitionResult",
+                                    modifier = Modifier.padding(top = 8.dp),
+                                    color = Color.Red
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // 输入区域
                 Row(
                     modifier = Modifier
@@ -175,14 +336,30 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // 语音输入按钮
-                    IconButton(onClick = {
-                        recordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    }) {
+                    // 长按录音按钮
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isRecording) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primaryContainer
+                            )
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onPress = {
+                                        checkPermissionAndStartRecording()
+                                        awaitRelease()
+                                        stopRecognition()
+                                    }
+                                )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(
                             Icons.Default.Mic,
-                            contentDescription = "语音输入",
-                            tint = MaterialTheme.colorScheme.primary
+                            contentDescription = "按住录音",
+                            tint = if (isRecording) Color.White else MaterialTheme.colorScheme.primary
                         )
                     }
 
@@ -207,6 +384,17 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Text("发送")
                     }
+                }
+            }
+        }
+
+        // 组件销毁时释放资源
+        DisposableEffect(Unit) {
+            onDispose {
+                speechService?.shutdown()
+                speechService = null
+                model?.apply {
+                    close()
                 }
             }
         }
@@ -248,7 +436,6 @@ class MainActivity : ComponentActivity() {
                                     .size(200.dp)
                                     .clip(RoundedCornerShape(8.dp)),
                                 contentScale = ContentScale.Crop,
-                                //placeholder = painterResource(id = R.drawable.ic_launcher_background),
                                 error = painterResource(id = R.drawable.ic_launcher_foreground)
                             )
                             // 显示图片描述
@@ -266,7 +453,6 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(8.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            // 显示语音消息
                             Row(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -276,16 +462,13 @@ class MainActivity : ComponentActivity() {
                                     modifier = Modifier.size(24.dp),
                                     tint = if (message.isUser) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = "语音消息",
                                     color = if (message.isUser) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-
-                            // 显示语音转文本结果
-                            if (message.content?.isNotEmpty() == true) {
+                            if (message.content?.isNotEmpty() == true && !message.content.startsWith("语音已发送")) {
                                 Text(
                                     text = "文本: ${message.content}",
                                     modifier = Modifier.padding(top = 4.dp),
@@ -308,4 +491,3 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-

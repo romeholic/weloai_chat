@@ -51,6 +51,9 @@ android {
 }
 
 dependencies {
+    implementation(libs.ui)
+    implementation(libs.alphacephei.vosk.android)
+    implementation(libs.androidx.foundation)
     implementation(libs.coil.compose.v240)
     implementation(libs.java.websocket)
     implementation(libs.androidx.material.icons.extended)
