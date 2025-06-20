@@ -1,3 +1,4 @@
+import com.android.build.gradle.tasks.MergeResources
 import org.gradle.kotlin.dsl.implementation
 
 plugins {
@@ -50,7 +51,18 @@ android {
     }
 }
 
+project(":models").afterEvaluate {
+    tasks.withType<MergeResources> {
+        dependsOn(tasks.named("genUUID"))
+    }
+}
+
+/*tasks.withType<MergeResources> {
+    dependsOn(project(":models").tasks.named("genUUID"))
+}*/
+
 dependencies {
+    implementation(project(":models"))
     implementation(libs.ui)
     implementation(libs.alphacephei.vosk.android)
     implementation(libs.androidx.foundation)

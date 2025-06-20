@@ -42,11 +42,13 @@ import com.welo.aichat.viewmodel.ChatViewModel
 import kotlinx.coroutines.launch
 import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
 import org.vosk.LibVosk
 import org.vosk.LogLevel
 import org.vosk.Model
 import org.vosk.android.RecognitionListener
 import org.vosk.android.SpeechService
+import org.vosk.android.StorageService
 import java.io.File
 import java.io.IOException
 
@@ -99,7 +101,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 录音状态
+       /* // 录音状态
         var isRecording by remember { mutableStateOf(false) }
 
         // Vosk相关变量
@@ -293,6 +295,189 @@ class MainActivity : ComponentActivity() {
                 startRecognition()
             } else {
                 requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }*/
+
+        // 录音状态
+        var isRecording by remember { mutableStateOf(false) }
+
+        // Vosk相关变量
+        var speechService: SpeechService? by remember { mutableStateOf(null) }
+        var model: Model? by remember { mutableStateOf(null) }
+
+        // 语音识别结果
+        var recognitionResult by remember { mutableStateOf("") }
+        val isModelLoaded = remember { mutableStateOf(false) }
+
+
+        // 开始录音和识别
+        fun startRecognition() {
+            if (!isModelLoaded.value) {
+                scope.launch {
+                    snackbarHostState.showSnackbar("模型未加载，请稍候...")
+                }
+                return
+            }
+
+            try {
+                // 创建识别器，设置采样率为16000Hz
+                val recognizer = org.vosk.Recognizer(model, 16000.0f)
+
+                // 创建语音服务
+                speechService = SpeechService(recognizer, 16000.0f).apply {
+                    startListening(object : RecognitionListener {
+                        // Vosk识别结果回调（中间结果）
+                        override fun onResult(hypothesis: String?) {
+                            hypothesis?.let {
+                                scope.launch {
+                                    recognitionResult = it
+                                    // 实时显示识别结果
+                                }
+                            }
+                        }
+
+                        // Vosk最终识别结果回调
+                        override fun onFinalResult(hypothesis: String?) {
+                            hypothesis?.let { finalResult ->
+                                scope.launch {
+                                    recognitionResult = finalResult
+                                    // 发送最终识别结果到后端
+                                    viewModel.sendMessageToAI("用户语音输入: $finalResult")
+
+                                    // 添加语音消息到聊天列表
+                                    val newMessages = chatMessages.toMutableList()
+                                    newMessages.add(
+                                        ChatMessage(
+                                            content = "语音已发送",
+                                            isUser = true,
+                                            type = MessageType.AUDIO,
+                                            timestamp = System.currentTimeMillis()
+                                        )
+                                    )
+                                    viewModel.updateMessages(newMessages)
+                                }
+                            }
+                        }
+
+                        // 识别错误回调
+                        override fun onError(e: Exception?) {
+                            scope.launch {
+                                val errorMessage = e?.message ?: "识别错误"
+                                snackbarHostState.showSnackbar(errorMessage)
+                            }
+                        }
+
+                        // 识别超时回调
+                        override fun onTimeout() {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("识别超时")
+                            }
+                        }
+
+                        // 以下是可选方法的空实现
+                        override fun onPartialResult(hypothesis: String?) {
+                            // 处理部分识别结果（可选）
+                        }
+                    })
+                }
+                isRecording = true
+            } catch (e: Exception) {
+                scope.launch {
+                    snackbarHostState.showSnackbar("启动识别失败: ${e.message}")
+                }
+                isRecording = false
+            }
+        }
+
+        // 停止录音和识别
+        fun stopRecognition() {
+            speechService?.stop()
+            speechService?.shutdown()
+            speechService = null
+            isRecording = false
+        }
+
+        // 请求录音权限
+        val requestPermissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                startRecognition()
+            } else {
+                scope.launch {
+                    snackbarHostState.showSnackbar("需要录音权限才能使用语音消息功能")
+                }
+            }
+        }
+
+        // 检查权限并开始录音
+        fun checkPermissionAndStartRecording() {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                startRecognition()
+            } else {
+                requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }
+
+        // 使用StorageService.unpack从assets目录加载模型
+        suspend fun initVoskModelFromAssets(
+            context: Context,
+            snackbarHostState: SnackbarHostState,
+            scope: CoroutineScope
+        ) {
+            Log.d("VoskModel", "开始从assets目录加载模型")
+            LibVosk.setLogLevel(LogLevel.INFO)
+
+            try {
+                snackbarHostState.showSnackbar("正在准备语音识别模型...")
+
+                //val modelAssetName = "vosk-model-small-cn-0.22" // 根据你的实际文件名修改
+                val modelAssetName = "vosk-model-cn"
+
+                // 解压到应用内部存储的路径
+                //val unpackPath = context.getDir("vosk_model", Context.MODE_PRIVATE).absolutePath
+                val unpackPath = "model"
+
+                // 使用StorageService.unpack方法解压模型
+                StorageService.unpack(
+                    context,
+                    modelAssetName,
+                    unpackPath,
+                    { loadedModel ->
+                        // 模型加载成功回调
+                        model = loadedModel
+                        isModelLoaded.value = true
+                        Log.d("VoskModel", "模型加载成功: $unpackPath")
+
+                        scope.launch {
+                            snackbarHostState.showSnackbar("语音识别模型加载成功")
+                        }
+                    },
+                    { exception ->
+                        // 模型加载失败回调
+                        Log.e("VoskModel", "模型加载失败", exception)
+                        scope.launch {
+                            snackbarHostState.showSnackbar("模型加载失败: ${exception.message}")
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e("VoskModel", "模型初始化失败", e)
+                scope.launch {
+                    snackbarHostState.showSnackbar("模型初始化失败: ${e.message}")
+                }
+            }
+        }
+
+
+        // 初始化Vosk模型 - 使用StorageService.unpack方法
+        LaunchedEffect(Unit) {
+            scope.launch {
+                initVoskModelFromAssets(context, snackbarHostState, scope)
             }
         }
 
